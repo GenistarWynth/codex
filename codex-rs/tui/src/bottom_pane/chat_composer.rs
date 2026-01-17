@@ -253,6 +253,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
@@ -389,6 +390,14 @@ pub(crate) struct ChatComposer {
     history_search_next_keys: Vec<KeyBinding>,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
+    // CxLine statusline state.
+    context_window_used_tokens: Option<i64>,
+    context_window_size: Option<i64>,
+    statusline_config: crate::statusline::config::CxLineConfig,
+    statusline_model: String,
+    statusline_cwd: PathBuf,
+    statusline_rate_limit_percent: Option<f64>,
+    statusline_rate_limit_resets_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -556,6 +565,14 @@ impl ChatComposer {
             history_search_next_keys: default_keymap.composer.history_search_next.clone(),
             editor_keymap: default_editor_keymap,
             vim_normal_keymap: default_vim_normal_keymap,
+            // CxLine statusline state.
+            context_window_used_tokens: None,
+            context_window_size: None,
+            statusline_config: crate::statusline::config::CxLineConfig::load(),
+            statusline_model: String::new(),
+            statusline_cwd: PathBuf::new(),
+            statusline_rate_limit_percent: None,
+            statusline_rate_limit_resets_at: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -3891,14 +3908,54 @@ impl ChatComposer {
         self.queue_submissions = queue_submissions;
     }
 
-    pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
-        if self.footer.context_window_percent == percent
-            && self.footer.context_window_used_tokens == used_tokens
+    pub(crate) fn set_context_window(
+        &mut self,
+        used_tokens: Option<i64>,
+        window_size: Option<i64>,
+    ) {
+        if self.context_window_used_tokens == used_tokens
+            && self.context_window_size == window_size
         {
             return;
         }
+        self.context_window_used_tokens = used_tokens;
+        self.context_window_size = window_size;
+
+        // Keep upstream's footer context display fed: derive the remaining-percent
+        // when both values are known, otherwise fall back to the raw token count.
+        let percent = match (used_tokens, window_size) {
+            (Some(used), Some(size)) if size > 0 => {
+                let remaining = ((size - used).max(0) as f64 / size as f64 * 100.0).round() as i64;
+                Some(remaining.clamp(0, 100))
+            }
+            _ => None,
+        };
         self.footer.context_window_percent = percent;
         self.footer.context_window_used_tokens = used_tokens;
+    }
+
+    /// CxLine: set the live statusline data (model, cwd, rate-limit usage).
+    pub fn set_statusline_data(
+        &mut self,
+        model: &str,
+        cwd: &Path,
+        rate_limit_percent: Option<f64>,
+        rate_limit_resets_at: Option<String>,
+    ) {
+        self.statusline_model = model.to_string();
+        self.statusline_cwd = cwd.to_path_buf();
+        self.statusline_rate_limit_percent = rate_limit_percent;
+        self.statusline_rate_limit_resets_at = rate_limit_resets_at;
+    }
+
+    /// CxLine: get the current statusline config.
+    pub fn get_statusline_config(&self) -> crate::statusline::config::CxLineConfig {
+        self.statusline_config.clone()
+    }
+
+    /// CxLine: replace the statusline config.
+    pub fn set_statusline_config(&mut self, config: crate::statusline::config::CxLineConfig) {
+        self.statusline_config = config;
     }
 
     pub(crate) fn set_esc_backtrack_hint(&mut self, show: bool) {
@@ -4386,6 +4443,37 @@ impl ChatComposer {
         }
         let style = user_message_style();
         Block::default().style(style).render_ref(composer_rect, buf);
+
+        // CxLine: render the statusline in the bottom row of the composer block
+        // (below the textarea, which is inset by one row top and bottom). This is
+        // additive and does not change the composer/textarea/popup layout.
+        if self.statusline_config.enabled && composer_rect.height >= 2 {
+            let statusline_y = composer_rect.y + composer_rect.height - 1;
+            if statusline_y < buf.area.y + buf.area.height
+                && composer_rect.width > LIVE_PREFIX_COLS
+            {
+                let ctx = crate::statusline::StatusLineContext::new(
+                    &self.statusline_model,
+                    &self.statusline_cwd,
+                )
+                .with_context(self.context_window_used_tokens, self.context_window_size)
+                .with_rate_limit(
+                    self.statusline_rate_limit_percent,
+                    self.statusline_rate_limit_resets_at.clone(),
+                );
+                let renderer = crate::statusline::build_statusline(&self.statusline_config, &ctx);
+                let widget = crate::statusline::StatusLineWidget::from_renderer(&renderer);
+                // Align the statusline content with the composer's "❯" prompt column.
+                let aligned_rect = Rect::new(
+                    composer_rect.x + LIVE_PREFIX_COLS,
+                    statusline_y,
+                    composer_rect.width.saturating_sub(LIVE_PREFIX_COLS),
+                    1,
+                );
+                widget.render_ref(aligned_rect, buf);
+            }
+        }
+
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
                 .style(style)
@@ -4396,10 +4484,10 @@ impl ChatComposer {
                 if self.draft.is_bash_mode {
                     Span::from("!").light_red().bold()
                 } else {
-                    "›".bold()
+                    "❯".bold()
                 }
             } else {
-                "›".dim()
+                "❯".dim()
             };
             buf.set_span(
                 textarea_rect.x - LIVE_PREFIX_COLS,

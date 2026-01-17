@@ -878,6 +878,13 @@ impl App {
                     self.launch_external_editor(tui).await;
                 }
             }
+            AppEvent::OpenCxlineConfig => {
+                // Open the CxLine configuration screen using the overlay (alt-screen) mode.
+                let config = self.chat_widget.get_statusline_config();
+                let _ = tui.enter_alt_screen();
+                self.overlay = Some(Overlay::new_cxline(config));
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::OpenWindowsSandboxEnablePrompt {
                 preset,
                 profile_selection,

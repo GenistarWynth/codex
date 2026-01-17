@@ -366,6 +366,9 @@ impl ChatWidget {
             SlashCommand::Memories => {
                 self.open_memories_popup();
             }
+            SlashCommand::Cxline => {
+                self.app_event_tx.send(AppEvent::OpenCxlineConfig);
+            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_quit_without_confirmation();
             }

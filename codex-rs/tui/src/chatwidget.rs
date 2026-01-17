@@ -1111,25 +1111,49 @@ impl ChatWidget {
     }
 
     fn apply_token_info(&mut self, info: TokenUsageInfo) {
-        let percent = self.context_remaining_percent(&info);
-        let used_tokens = self.context_used_tokens(&info, percent.is_some());
-        self.bottom_pane.set_context_window(percent, used_tokens);
+        // CxLine: feed the statusline with the live context-window usage. Use
+        // last_token_usage (what the model currently "sees") rather than the
+        // cumulative session total, plus the model's context window size.
+        let used_tokens = Some(info.last_token_usage.tokens_in_context_window());
+        let window_size = info.model_context_window;
+        self.bottom_pane.set_context_window(used_tokens, window_size);
         self.token_info = Some(info);
+        self.update_statusline_data();
     }
 
-    fn context_remaining_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
-        info.model_context_window.map(|window| {
-            info.last_token_usage
-                .percent_of_context_window_remaining(window)
-        })
+    /// CxLine: refresh the live statusline data (model, cwd, rate-limit usage).
+    fn update_statusline_data(&mut self) {
+        let (rate_limit_percent, rate_limit_resets_at) = self
+            .rate_limit_snapshots_by_limit_id
+            .values()
+            .find_map(|snapshot| {
+                snapshot
+                    .primary
+                    .as_ref()
+                    .map(|primary| (Some(primary.used_percent), primary.resets_at.clone()))
+            })
+            .unwrap_or((None, None));
+
+        let model = self.model.clone().unwrap_or_default();
+        self.bottom_pane.set_statusline_data(
+            &model,
+            self.config.cwd.as_path(),
+            rate_limit_percent,
+            rate_limit_resets_at,
+        );
     }
 
-    fn context_used_tokens(&self, info: &TokenUsageInfo, percent_known: bool) -> Option<i64> {
-        if percent_known {
-            return None;
-        }
+    /// CxLine: get the current statusline config (used by the /cxline overlay).
+    pub(crate) fn get_statusline_config(&self) -> crate::statusline::config::CxLineConfig {
+        self.bottom_pane.get_statusline_config()
+    }
 
-        Some(info.total_token_usage.tokens_in_context_window())
+    /// CxLine: replace the statusline config (used by the /cxline overlay).
+    pub(crate) fn set_statusline_config(
+        &mut self,
+        config: crate::statusline::config::CxLineConfig,
+    ) {
+        self.bottom_pane.set_statusline_config(config);
     }
 
     fn restore_pre_review_token_info(&mut self) {

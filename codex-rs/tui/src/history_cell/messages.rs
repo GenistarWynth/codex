@@ -151,7 +151,15 @@ impl HistoryCell for UserHistoryCell {
             return Vec::new();
         }
 
-        let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
+        // CxLine: render user messages without the surrounding blank lines and
+        // with the "❯" prefix. Keep upstream's blank-line separation only when
+        // remote images are present so the remote-image layout is preserved.
+        let has_remote_images = wrapped_remote_images.is_some();
+        let mut lines: Vec<Line<'static>> = if has_remote_images {
+            vec![Line::from("").style(style)]
+        } else {
+            Vec::new()
+        };
 
         if let Some(wrapped_remote_images) = wrapped_remote_images {
             lines.extend(prefix_lines(
@@ -167,12 +175,14 @@ impl HistoryCell for UserHistoryCell {
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(
                 wrapped_message,
-                "› ".bold().dim(),
+                "❯ ".bold().dim(),
                 "  ".into(),
             ));
         }
 
-        lines.push(Line::from("").style(style));
+        if has_remote_images {
+            lines.push(Line::from("").style(style));
+        }
         lines
     }
 

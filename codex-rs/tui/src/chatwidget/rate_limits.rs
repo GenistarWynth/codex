@@ -281,6 +281,8 @@ impl ChatWidget {
             self.codex_rate_limit_reached_type = None;
         }
         self.refresh_status_line();
+        // CxLine: refresh the statusline so its rate-limit/usage segment updates.
+        self.update_statusline_data();
     }
 
     pub(super) fn stop_rate_limit_poller(&mut self) {}

@@ -235,8 +235,10 @@ pub(crate) struct BottomPane {
     pending_input_preview: PendingInputPreview,
     /// Inactive threads with pending approval requests.
     pending_thread_approvals: PendingThreadApprovals,
-    context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    // CxLine: track the context window size instead of a precomputed percent so
+    // the statusline can compute its own usage display.
+    context_window_size: Option<i64>,
     keymap: RuntimeKeymap,
 }
 
@@ -292,8 +294,8 @@ impl BottomPane {
             pending_thread_approvals: PendingThreadApprovals::new(),
             esc_backtrack_hint: false,
             animations_enabled,
-            context_window_percent: None,
             context_window_used_tokens: None,
+            context_window_size: None,
             keymap,
         }
     }
@@ -473,13 +475,13 @@ impl BottomPane {
     }
 
     #[cfg(test)]
-    pub(crate) fn context_window_percent(&self) -> Option<i64> {
-        self.context_window_percent
+    pub(crate) fn context_window_used_tokens(&self) -> Option<i64> {
+        self.context_window_used_tokens
     }
 
     #[cfg(test)]
-    pub(crate) fn context_window_used_tokens(&self) -> Option<i64> {
-        self.context_window_used_tokens
+    pub(crate) fn context_window_size(&self) -> Option<i64> {
+        self.context_window_size
     }
 
     fn active_view(&self) -> Option<&dyn BottomPaneView> {
@@ -1058,16 +1060,45 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn set_context_window(&mut self, percent: Option<i64>, used_tokens: Option<i64>) {
-        if self.context_window_percent == percent && self.context_window_used_tokens == used_tokens
+    pub(crate) fn set_context_window(
+        &mut self,
+        used_tokens: Option<i64>,
+        window_size: Option<i64>,
+    ) {
+        if self.context_window_used_tokens == used_tokens && self.context_window_size == window_size
         {
             return;
         }
 
-        self.context_window_percent = percent;
         self.context_window_used_tokens = used_tokens;
+        self.context_window_size = window_size;
+        self.composer.set_context_window(used_tokens, window_size);
+        self.request_redraw();
+    }
+
+    /// 获取状态栏配置
+    pub(crate) fn get_statusline_config(&self) -> crate::statusline::config::CxLineConfig {
+        self.composer.get_statusline_config()
+    }
+
+    /// 设置状态栏配置
+    pub(crate) fn set_statusline_config(
+        &mut self,
+        config: crate::statusline::config::CxLineConfig,
+    ) {
+        self.composer.set_statusline_config(config);
+    }
+
+    /// 设置状态栏数据
+    pub(crate) fn set_statusline_data(
+        &mut self,
+        model: &str,
+        cwd: &std::path::Path,
+        rate_limit_percent: Option<f64>,
+        rate_limit_resets_at: Option<String>,
+    ) {
         self.composer
-            .set_context_window(percent, self.context_window_used_tokens);
+            .set_statusline_data(model, cwd, rate_limit_percent, rate_limit_resets_at);
         self.request_redraw();
     }
 

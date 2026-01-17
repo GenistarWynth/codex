@@ -501,7 +501,7 @@ impl ListSelectionView {
             .filter_map(|(visible_idx, actual_idx)| {
                 self.active_items().get(*actual_idx).map(|item| {
                     let is_selected = self.state.selected_idx == Some(visible_idx);
-                    let prefix = if is_selected { '›' } else { ' ' };
+                    let prefix = if is_selected { '❯' } else { ' ' };
                     let name = item.name.as_str();
                     let marker = if item.is_current {
                         " (current)"

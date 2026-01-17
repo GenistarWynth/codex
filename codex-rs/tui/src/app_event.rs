@@ -1008,6 +1008,9 @@ pub(crate) enum AppEvent {
         context: String,
         action: String,
     },
+
+    /// Open the CxLine configuration screen (full-screen).
+    OpenCxlineConfig,
 }
 
 /// Named profile selection to apply after any required UI guardrails complete.

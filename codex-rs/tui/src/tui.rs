@@ -175,6 +175,9 @@ pub fn set_modes() -> Result<()> {
 
     execute!(stdout(), EnableBracketedPaste)?;
 
+    // 设置稳定块状光标（不闪烁），避免闪烁时反色导致文字不可见
+    let _ = execute!(stdout(), SetCursorStyle::SteadyBlock);
+
     enable_raw_mode()?;
     // Enable keyboard enhancement flags so modifiers for keys like Enter are disambiguated.
     // chat_composer.rs is using a keyboard event listener to enter for any modified keys

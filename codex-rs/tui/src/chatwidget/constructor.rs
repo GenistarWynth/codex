@@ -268,6 +268,8 @@ impl ChatWidget {
             .bottom_pane
             .set_token_activity_command_enabled(widget.has_codex_backend_auth);
         widget.refresh_status_surfaces();
+        // CxLine: initialize the statusline data so it renders immediately.
+        widget.update_statusline_data();
 
         widget
     }

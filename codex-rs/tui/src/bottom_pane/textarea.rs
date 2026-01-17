@@ -26,6 +26,7 @@ use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
@@ -1970,6 +1971,20 @@ impl TextArea {
                 let highlighted = &self.text[overlap_start..overlap_end];
                 let x_off = self.text[line_range.start..overlap_start].width() as u16;
                 buf.set_string(area.x + x_off, y, highlighted, *style);
+            }
+
+            // CxLine: apply reverse style to the character at cursor position so
+            // the inverse-video cursor is drawn by the textarea itself (cursor_pos
+            // returns None to hide the terminal cursor).
+            if self.cursor_pos >= line_range.start && self.cursor_pos <= line_range.end {
+                let cursor_x = self.text[line_range.start..self.cursor_pos].width() as u16;
+                let cursor_screen_x = area.x + cursor_x;
+                if cursor_screen_x < area.x + area.width {
+                    let cell = buf.cell_mut((cursor_screen_x, y));
+                    if let Some(cell) = cell {
+                        cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                    }
+                }
             }
         }
     }
