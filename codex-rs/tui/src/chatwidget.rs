@@ -1123,14 +1123,24 @@ impl ChatWidget {
 
     /// CxLine: refresh the live statusline data (model, cwd, rate-limit usage).
     fn update_statusline_data(&mut self) {
+        // CxLine shows a single rate-limit value, but upstream now tracks
+        // multiple limits keyed by id and designates "codex" as the main limit
+        // (see chatwidget/status_controls.rs). Prefer that one; otherwise fall
+        // back to the first snapshot that carries a primary limit.
+        let primary_of = |snapshot: &RateLimitSnapshotDisplay| {
+            snapshot
+                .primary
+                .as_ref()
+                .map(|primary| (Some(primary.used_percent), primary.resets_at.clone()))
+        };
         let (rate_limit_percent, rate_limit_resets_at) = self
             .rate_limit_snapshots_by_limit_id
-            .values()
-            .find_map(|snapshot| {
-                snapshot
-                    .primary
-                    .as_ref()
-                    .map(|primary| (Some(primary.used_percent), primary.resets_at.clone()))
+            .get("codex")
+            .and_then(|snapshot| primary_of(snapshot))
+            .or_else(|| {
+                self.rate_limit_snapshots_by_limit_id
+                    .values()
+                    .find_map(|snapshot| primary_of(snapshot))
             })
             .unwrap_or((None, None));
 
