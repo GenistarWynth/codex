@@ -1,0 +1,85 @@
+# CxLine fork: build codex.exe for Windows x64 using standard GitHub-hosted runners.
+# Triggered by tags matching rust-v*.*.*-cometix (and plain rust-v*.*.* for compatibility).
+name: cxline-windows-build
+
+on:
+  push:
+    tags:
+      - "rust-v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tag-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate tag vs Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Strip leading rust-v
+          tag_ver="${tag#rust-v}"
+          cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          echo "Tag version:   ${tag_ver}"
+          echo "Cargo version: ${cargo_ver}"
+          [[ "${tag_ver}" == "${cargo_ver}" ]] \
+            || { echo "ERROR: tag ${tag_ver} != Cargo.toml ${cargo_ver}"; exit 1; }
+          echo "OK: versions match"
+
+  build-windows:
+    needs: tag-check
+    name: Build codex.exe - windows-latest - x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (1.87 stable, MSVC target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codex-rs/target
+          key: windows-msvc-cargo-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: windows-msvc-cargo-
+
+      - name: Cargo build (release)
+        shell: bash
+        run: |
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          cargo build --target x86_64-pc-windows-msvc --release --bin codex
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p ../dist/x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/codex.exe \
+             ../dist/x86_64-pc-windows-msvc/codex-x86_64-pc-windows-msvc.exe
+
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/codex-x86_64-pc-windows-msvc.exe
+          if-no-files-found: error
