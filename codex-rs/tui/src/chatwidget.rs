@@ -1144,13 +1144,28 @@ impl ChatWidget {
             })
             .unwrap_or((None, None));
 
-        let model = self.model.clone().unwrap_or_default();
+        let model = self.current_model().to_string();
         self.bottom_pane.set_statusline_data(
             &model,
             self.config.cwd.as_path(),
             rate_limit_percent,
             rate_limit_resets_at,
         );
+    }
+
+    fn context_remaining_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
+        info.model_context_window.map(|window| {
+            info.last_token_usage
+                .percent_of_context_window_remaining(window)
+        })
+    }
+
+    fn context_used_tokens(&self, info: &TokenUsageInfo, percent_known: bool) -> Option<i64> {
+        if percent_known {
+            return None;
+        }
+
+        Some(info.total_token_usage.tokens_in_context_window())
     }
 
     /// CxLine: get the current statusline config (used by the /cxline overlay).
