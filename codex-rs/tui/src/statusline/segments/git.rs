@@ -3,7 +3,9 @@
 
 use crate::statusline::StatusLineContext;
 use crate::statusline::segment::{Segment, SegmentData, SegmentId};
+use std::cell::RefCell;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Git 状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +16,7 @@ pub enum GitStatus {
 }
 
 /// Git 信息
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GitInfo {
     pub branch: String,
     pub status: GitStatus,
@@ -24,8 +26,56 @@ pub struct GitInfo {
 
 pub struct GitSegment;
 
+/// CxLine: the git segment shells out to several `git` subprocesses, but the
+/// statusline is rebuilt on every TUI render (i.e. every keystroke). Without a
+/// cache, typing in a large repo spawns many `git` processes per second and
+/// makes input/output visibly laggy. Cache the result per working_dir for a
+/// short TTL so renders read cached data instead of re-spawning git each frame.
+const GIT_CACHE_TTL: Duration = Duration::from_millis(2000);
+
+struct GitCacheEntry {
+    working_dir: String,
+    computed_at: Instant,
+    info: Option<GitInfo>,
+}
+
+thread_local! {
+    static GIT_CACHE: RefCell<Option<GitCacheEntry>> = const { RefCell::new(None) };
+}
+
 impl GitSegment {
+    /// Cached entry point used during rendering. Returns cached git info when
+    /// the working_dir matches and the entry is still fresh; otherwise computes
+    /// it once and stores it. Caches the `None` (not a repo) result too, so
+    /// non-repo directories don't re-run `git rev-parse` on every frame.
     fn get_git_info(&self, working_dir: &std::path::Path) -> Option<GitInfo> {
+        let key = working_dir.to_string_lossy().into_owned();
+
+        let cached = GIT_CACHE.with(|cache| {
+            cache.borrow().as_ref().and_then(|entry| {
+                if entry.working_dir == key && entry.computed_at.elapsed() < GIT_CACHE_TTL {
+                    Some(entry.info.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(info) = cached {
+            return info;
+        }
+
+        let info = self.compute_git_info(working_dir);
+        GIT_CACHE.with(|cache| {
+            *cache.borrow_mut() = Some(GitCacheEntry {
+                working_dir: key,
+                computed_at: Instant::now(),
+                info: info.clone(),
+            });
+        });
+        info
+    }
+
+    fn compute_git_info(&self, working_dir: &std::path::Path) -> Option<GitInfo> {
         let working_dir = working_dir.to_string_lossy();
 
         if !self.is_git_repository(&working_dir) {
