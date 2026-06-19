@@ -398,6 +398,11 @@ pub(crate) struct ChatComposer {
     statusline_cwd: PathBuf,
     statusline_rate_limit_percent: Option<f64>,
     statusline_rate_limit_resets_at: Option<String>,
+    // CxLine: precomputed git preview, refreshed (with a TTL) off the render path
+    // in set_statusline_data so render() never spawns git subprocesses.
+    statusline_git_preview: Option<crate::statusline::GitPreviewData>,
+    statusline_git_computed_at: Option<std::time::Instant>,
+    statusline_git_cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -573,6 +578,9 @@ impl ChatComposer {
             statusline_cwd: PathBuf::new(),
             statusline_rate_limit_percent: None,
             statusline_rate_limit_resets_at: None,
+            statusline_git_preview: None,
+            statusline_git_computed_at: None,
+            statusline_git_cwd: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -730,7 +738,7 @@ impl ChatComposer {
     pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
         self.windows_degraded_sandbox_active = enabled;
     }
-    fn layout_areas(&self, area: Rect) -> [Rect; 4] {
+    fn layout_areas(&self, area: Rect) -> [Rect; 5] {
         self.layout_areas_with_textarea_right_reserve(area, /*textarea_right_reserve*/ 0)
     }
 
@@ -738,13 +746,17 @@ impl ChatComposer {
         &self,
         area: Rect,
         textarea_right_reserve: u16,
-    ) -> [Rect; 4] {
+    ) -> [Rect; 5] {
         let footer_props = self.footer_props();
         let footer_hint_height = self
             .custom_footer_height()
             .unwrap_or_else(|| footer_height(&footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
+        // CxLine: reserve a dedicated row for the statusline (below the composer
+        // block, above the footer/popup). Height is 1 when enabled, else 0 so the
+        // layout collapses to the original when the statusline is disabled.
+        let statusline_height: u16 = if self.statusline_config.enabled { 1 } else { 0 };
         let popup_constraint = match &self.popups.active {
             ActivePopup::Command(popup) => {
                 Constraint::Max(popup.calculate_required_height(area.width))
@@ -758,8 +770,12 @@ impl ChatComposer {
             }
             ActivePopup::None => Constraint::Max(footer_total_height),
         };
-        let [composer_rect, popup_rect] =
-            Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
+        let [composer_rect, statusline_rect, popup_rect] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(statusline_height),
+            popup_constraint,
+        ])
+        .areas(area);
         let mut textarea_rect = composer_rect.inset(Insets::tlbr(
             /*top*/ 1,
             LIVE_PREFIX_COLS,
@@ -783,7 +799,13 @@ impl ChatComposer {
         };
         textarea_rect.y = textarea_rect.y.saturating_add(consumed);
         textarea_rect.height = textarea_rect.height.saturating_sub(consumed);
-        [composer_rect, remote_images_rect, textarea_rect, popup_rect]
+        [
+            composer_rect,
+            remote_images_rect,
+            textarea_rect,
+            statusline_rect,
+            popup_rect,
+        ]
     }
 
     fn footer_spacing(footer_hint_height: u16) -> u16 {
@@ -811,7 +833,7 @@ impl ChatComposer {
             return Some(pos);
         }
 
-        let [_, _, textarea_rect, _] =
+        let [_, _, textarea_rect, _, _] =
             self.layout_areas_with_textarea_right_reserve(area, textarea_right_reserve);
         let state = *self.draft.textarea_state.borrow();
         self.draft
@@ -3935,6 +3957,12 @@ impl ChatComposer {
     }
 
     /// CxLine: set the live statusline data (model, cwd, rate-limit usage).
+    ///
+    /// This is event-driven: it fires on startup, model changes, token-usage
+    /// updates, and rate-limit updates — but NOT on plain keystrokes. We use it
+    /// as the place to precompute git info (off the render/keystroke path) and
+    /// store it as a preview so `render()` never spawns git subprocesses. A short
+    /// TTL keeps streaming token updates from recomputing git on every chunk.
     pub fn set_statusline_data(
         &mut self,
         model: &str,
@@ -3946,6 +3974,29 @@ impl ChatComposer {
         self.statusline_cwd = cwd.to_path_buf();
         self.statusline_rate_limit_percent = rate_limit_percent;
         self.statusline_rate_limit_resets_at = rate_limit_resets_at;
+        self.refresh_statusline_git_preview(cwd);
+    }
+
+    /// CxLine: recompute the git preview off the render path, at most once per
+    /// `STATUSLINE_GIT_TTL`. Recomputes immediately when the working directory
+    /// changes. Keeping git entirely out of `render()` is what makes typing
+    /// smooth: keystrokes only ever read the cached preview.
+    fn refresh_statusline_git_preview(&mut self, cwd: &Path) {
+        if !self.statusline_config.enabled || !self.statusline_config.segments.git.enabled {
+            return;
+        }
+        const STATUSLINE_GIT_TTL: std::time::Duration = std::time::Duration::from_millis(2000);
+        let cwd_changed = self.statusline_git_cwd.as_deref() != Some(cwd);
+        let fresh = self
+            .statusline_git_computed_at
+            .is_some_and(|at| at.elapsed() < STATUSLINE_GIT_TTL);
+        if !cwd_changed && fresh {
+            return;
+        }
+        self.statusline_git_preview =
+            crate::statusline::segments::GitSegment::compute_git_preview(cwd);
+        self.statusline_git_computed_at = Some(std::time::Instant::now());
+        self.statusline_git_cwd = Some(cwd.to_path_buf());
     }
 
     /// CxLine: get the current statusline config.
@@ -4169,10 +4220,13 @@ impl ChatComposer {
             .try_into()
             .unwrap_or(u16::MAX);
         let remote_images_separator = u16::from(remote_images_height > 0);
+        // CxLine: account for the dedicated statusline row (1 when enabled, else 0).
+        let statusline_height: u16 = if self.statusline_config.enabled { 1 } else { 0 };
         self.draft.textarea.desired_height(inner_width)
             + remote_images_height
             + remote_images_separator
             + 2
+            + statusline_height
             + match &self.popups.active {
                 ActivePopup::None => footer_total_height,
                 ActivePopup::Command(c) => c.calculate_required_height(width),
@@ -4197,7 +4251,7 @@ impl ChatComposer {
         mask_char: Option<char>,
         textarea_right_reserve: u16,
     ) {
-        let [composer_rect, remote_images_rect, textarea_rect, popup_rect] =
+        let [composer_rect, remote_images_rect, textarea_rect, statusline_rect, popup_rect] =
             self.layout_areas_with_textarea_right_reserve(area, textarea_right_reserve);
         match &self.popups.active {
             ActivePopup::Command(popup) => {
@@ -4444,34 +4498,43 @@ impl ChatComposer {
         let style = user_message_style();
         Block::default().style(style).render_ref(composer_rect, buf);
 
-        // CxLine: render the statusline in the bottom row of the composer block
-        // (below the textarea, which is inset by one row top and bottom). This is
-        // additive and does not change the composer/textarea/popup layout.
-        if self.statusline_config.enabled && composer_rect.height >= 2 {
-            let statusline_y = composer_rect.y + composer_rect.height - 1;
-            if statusline_y < buf.area.y + buf.area.height
-                && composer_rect.width > LIVE_PREFIX_COLS
-            {
-                let ctx = crate::statusline::StatusLineContext::new(
-                    &self.statusline_model,
-                    &self.statusline_cwd,
-                )
-                .with_context(self.context_window_used_tokens, self.context_window_size)
-                .with_rate_limit(
-                    self.statusline_rate_limit_percent,
-                    self.statusline_rate_limit_resets_at.clone(),
+        // CxLine: render the statusline into its own dedicated row (reserved by
+        // layout_areas below the composer block), so it never overlaps the input
+        // box, footer, or popups. The render path performs ZERO git subprocesses:
+        // git data is precomputed off the render path in `set_statusline_data` and
+        // fed in here via `with_git_preview`.
+        if self.statusline_config.enabled
+            && statusline_rect.height > 0
+            && statusline_rect.y < buf.area.y + buf.area.height
+            && statusline_rect.width > LIVE_PREFIX_COLS
+        {
+            let mut ctx = crate::statusline::StatusLineContext::new(
+                &self.statusline_model,
+                &self.statusline_cwd,
+            )
+            .with_context(self.context_window_used_tokens, self.context_window_size)
+            .with_rate_limit(
+                self.statusline_rate_limit_percent,
+                self.statusline_rate_limit_resets_at.clone(),
+            );
+            if let Some(preview) = self.statusline_git_preview.as_ref() {
+                ctx = ctx.with_git_preview(
+                    &preview.branch,
+                    &preview.status,
+                    preview.ahead,
+                    preview.behind,
                 );
-                let renderer = crate::statusline::build_statusline(&self.statusline_config, &ctx);
-                let widget = crate::statusline::StatusLineWidget::from_renderer(&renderer);
-                // Align the statusline content with the composer's "❯" prompt column.
-                let aligned_rect = Rect::new(
-                    composer_rect.x + LIVE_PREFIX_COLS,
-                    statusline_y,
-                    composer_rect.width.saturating_sub(LIVE_PREFIX_COLS),
-                    1,
-                );
-                widget.render_ref(aligned_rect, buf);
             }
+            let renderer = crate::statusline::build_statusline(&self.statusline_config, &ctx);
+            let widget = crate::statusline::StatusLineWidget::from_renderer(&renderer);
+            // Align the statusline content with the composer's "❯" prompt column.
+            let aligned_rect = Rect::new(
+                statusline_rect.x + LIVE_PREFIX_COLS,
+                statusline_rect.y,
+                statusline_rect.width.saturating_sub(LIVE_PREFIX_COLS),
+                statusline_rect.height,
+            );
+            widget.render_ref(aligned_rect, buf);
         }
 
         if !remote_images_rect.is_empty() {

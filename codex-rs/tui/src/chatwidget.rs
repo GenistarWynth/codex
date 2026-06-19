@@ -1144,9 +1144,34 @@ impl ChatWidget {
             })
             .unwrap_or((None, None));
 
+        // CxLine: show the model together with its reasoning effort (e.g.
+        // "gpt-5.5 xhigh"), matching Codex's own status header. Resolve the
+        // effort the same way the status line does: effective override, then the
+        // configured effort, then the model's default. Omit the suffix when the
+        // effort is the default/unset so we don't render a redundant "default".
         let model = self.current_model().to_string();
+        let model_default_reasoning_effort =
+            self.model_catalog
+                .try_list_models()
+                .ok()
+                .and_then(|models| {
+                    models
+                        .into_iter()
+                        .find(|preset| preset.model == model)
+                        .map(|preset| preset.default_reasoning_effort)
+                });
+        let effort = self
+            .effective_reasoning_effort()
+            .or_else(|| self.config.model_reasoning_effort.clone())
+            .or(model_default_reasoning_effort);
+        let effort_label = Self::status_line_reasoning_effort_label(effort.as_ref());
+        let model_display = if effort_label == "default" {
+            model
+        } else {
+            format!("{model} {effort_label}")
+        };
         self.bottom_pane.set_statusline_data(
-            &model,
+            &model_display,
             self.config.cwd.as_path(),
             rate_limit_percent,
             rate_limit_resets_at,

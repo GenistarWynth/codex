@@ -1,11 +1,10 @@
 // Git Segment - 显示 Git 分支和状态
 // 搬迁自 CCometixLine
 
+use crate::statusline::GitPreviewData;
 use crate::statusline::StatusLineContext;
 use crate::statusline::segment::{Segment, SegmentData, SegmentId};
-use std::cell::RefCell;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 /// Git 状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,53 +25,28 @@ pub struct GitInfo {
 
 pub struct GitSegment;
 
-/// CxLine: the git segment shells out to several `git` subprocesses, but the
-/// statusline is rebuilt on every TUI render (i.e. every keystroke). Without a
-/// cache, typing in a large repo spawns many `git` processes per second and
-/// makes input/output visibly laggy. Cache the result per working_dir for a
-/// short TTL so renders read cached data instead of re-spawning git each frame.
-const GIT_CACHE_TTL: Duration = Duration::from_millis(2000);
-
-struct GitCacheEntry {
-    working_dir: String,
-    computed_at: Instant,
-    info: Option<GitInfo>,
-}
-
-thread_local! {
-    static GIT_CACHE: RefCell<Option<GitCacheEntry>> = const { RefCell::new(None) };
-}
-
 impl GitSegment {
-    /// Cached entry point used during rendering. Returns cached git info when
-    /// the working_dir matches and the entry is still fresh; otherwise computes
-    /// it once and stores it. Caches the `None` (not a repo) result too, so
-    /// non-repo directories don't re-run `git rev-parse` on every frame.
-    fn get_git_info(&self, working_dir: &std::path::Path) -> Option<GitInfo> {
-        let key = working_dir.to_string_lossy().into_owned();
-
-        let cached = GIT_CACHE.with(|cache| {
-            cache.borrow().as_ref().and_then(|entry| {
-                if entry.working_dir == key && entry.computed_at.elapsed() < GIT_CACHE_TTL {
-                    Some(entry.info.clone())
-                } else {
-                    None
-                }
-            })
-        });
-        if let Some(info) = cached {
-            return info;
-        }
-
-        let info = self.compute_git_info(working_dir);
-        GIT_CACHE.with(|cache| {
-            *cache.borrow_mut() = Some(GitCacheEntry {
-                working_dir: key,
-                computed_at: Instant::now(),
-                info: info.clone(),
-            });
-        });
-        info
+    /// CxLine: compute the git info for `working_dir` by shelling out to `git`.
+    ///
+    /// This MUST NOT be called from the render/keystroke path: the TUI rebuilds
+    /// the statusline on every render, so spawning `git` here would block typing.
+    /// Instead it is called event-driven from `ChatComposer::set_statusline_data`
+    /// (startup, model/token/rate-limit changes), the result is cached on the
+    /// composer with a TTL, and rendering reads that cached preview via
+    /// `StatusLineContext::with_git_preview`.
+    pub fn compute_git_preview(working_dir: &std::path::Path) -> Option<GitPreviewData> {
+        let info = GitSegment.compute_git_info(working_dir)?;
+        let status = match info.status {
+            GitStatus::Clean => "✓",
+            GitStatus::Dirty => "●",
+            GitStatus::Conflicts => "⚠",
+        };
+        Some(GitPreviewData {
+            branch: info.branch,
+            status: status.to_string(),
+            ahead: info.ahead,
+            behind: info.behind,
+        })
     }
 
     fn compute_git_info(&self, working_dir: &std::path::Path) -> Option<GitInfo> {
@@ -187,57 +161,29 @@ impl GitSegment {
 
 impl Segment for GitSegment {
     fn collect(&self, ctx: &StatusLineContext) -> Option<SegmentData> {
-        // 如果有预览数据，使用预览数据
-        if let Some(preview) = &ctx.git_preview {
-            let primary = preview.branch.clone();
-            let mut status_parts = Vec::new();
-            status_parts.push(preview.status.clone());
-            if preview.ahead > 0 {
-                status_parts.push(format!("↑{}", preview.ahead));
-            }
-            if preview.behind > 0 {
-                status_parts.push(format!("↓{}", preview.behind));
-            }
-            let secondary = status_parts.join(" ");
-            return Some(
-                SegmentData::new(primary)
-                    .with_secondary(secondary)
-                    .with_metadata("branch", &preview.branch)
-                    .with_metadata("status", &preview.status)
-                    .with_metadata("ahead", preview.ahead.to_string())
-                    .with_metadata("behind", preview.behind.to_string()),
-            );
+        // CxLine: the git segment is rendered exclusively from a precomputed
+        // preview (see `compute_git_preview`). We deliberately do NOT shell out
+        // to `git` here, because `collect` runs on the render path (every
+        // keystroke) — spawning git here is what caused the typing lag. When no
+        // preview is available (e.g. not a git repository, or git not computed
+        // yet) the segment is simply omitted.
+        let preview = ctx.git_preview.as_ref()?;
+        let primary = preview.branch.clone();
+        let mut status_parts = vec![preview.status.clone()];
+        if preview.ahead > 0 {
+            status_parts.push(format!("↑{}", preview.ahead));
         }
-
-        let git_info = self.get_git_info(ctx.cwd)?;
-
-        let primary = git_info.branch.clone();
-        let mut status_parts = Vec::new();
-
-        // 状态符号
-        match git_info.status {
-            GitStatus::Clean => status_parts.push("✓".to_string()),
-            GitStatus::Dirty => status_parts.push("●".to_string()),
-            GitStatus::Conflicts => status_parts.push("⚠".to_string()),
+        if preview.behind > 0 {
+            status_parts.push(format!("↓{}", preview.behind));
         }
-
-        // ahead/behind
-        if git_info.ahead > 0 {
-            status_parts.push(format!("↑{}", git_info.ahead));
-        }
-        if git_info.behind > 0 {
-            status_parts.push(format!("↓{}", git_info.behind));
-        }
-
         let secondary = status_parts.join(" ");
-
         Some(
             SegmentData::new(primary)
                 .with_secondary(secondary)
-                .with_metadata("branch", &git_info.branch)
-                .with_metadata("status", format!("{:?}", git_info.status))
-                .with_metadata("ahead", git_info.ahead.to_string())
-                .with_metadata("behind", git_info.behind.to_string()),
+                .with_metadata("branch", &preview.branch)
+                .with_metadata("status", &preview.status)
+                .with_metadata("ahead", preview.ahead.to_string())
+                .with_metadata("behind", preview.behind.to_string()),
         )
     }
 
