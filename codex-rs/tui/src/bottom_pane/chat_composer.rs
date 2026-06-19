@@ -150,7 +150,6 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
@@ -4496,7 +4495,30 @@ impl ChatComposer {
             }
         }
         let style = user_message_style();
-        Block::default().style(style).render_ref(composer_rect, buf);
+        // CxLine: draw the composer frame as thin top/bottom rule lines instead of
+        // a shaded/filled Block, matching the original CxLine clean thin-line look.
+        // The frame buffer is reset to default cells before every draw (see
+        // custom_terminal::swap_buffers), so composer_rect is already cleared each
+        // frame; we do not need a filled Block to erase stale content.
+        if composer_rect.height > 0 && composer_rect.y < buf.area.y + buf.area.height {
+            let top_border_line = "─".repeat(composer_rect.width as usize);
+            buf.set_string(
+                composer_rect.x,
+                composer_rect.y,
+                &top_border_line,
+                Style::default().dim(),
+            );
+        }
+        let bottom_y = composer_rect.y + composer_rect.height.saturating_sub(1);
+        if composer_rect.height > 1 && bottom_y < buf.area.y + buf.area.height {
+            let bottom_border_line = "─".repeat(composer_rect.width as usize);
+            buf.set_string(
+                composer_rect.x,
+                bottom_y,
+                &bottom_border_line,
+                Style::default().dim(),
+            );
+        }
 
         // CxLine: render the statusline into its own dedicated row (reserved by
         // layout_areas below the composer block), so it never overlaps the input
