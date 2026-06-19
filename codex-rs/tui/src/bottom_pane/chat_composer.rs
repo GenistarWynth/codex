@@ -3474,7 +3474,13 @@ impl ChatComposer {
             collaboration_modes_enabled: self.collaboration_modes_enabled,
             is_wsl,
             status_line_value: self.footer.status_line_value.clone(),
-            status_line_enabled: self.footer.status_line_enabled,
+            // CxLine: the CxLine statusline REPLACES the built-in status line, so
+            // suppress the built-in one whenever CxLine is enabled. Done here (not
+            // via the `tui.status_line` config) because codex rewrites config.toml
+            // at runtime and drops an empty `status_line = []`, so a config-only
+            // approach does not persist.
+            status_line_enabled: self.footer.status_line_enabled
+                && !self.statusline_config.enabled,
             key_hints: FooterKeyHints {
                 toggle_shortcuts: self.footer.toggle_shortcuts_key,
                 queue: self.footer.queue_key,
