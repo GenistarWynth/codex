@@ -470,6 +470,10 @@ impl ChatWidget {
     pub(super) fn refresh_model_dependent_surfaces(&mut self) {
         self.refresh_model_display();
         self.refresh_status_line();
+        // CxLine: refresh the statusline immediately on model/effort changes
+        // (e.g. /model) so the model segment updates right away instead of only
+        // after the next reply's token events.
+        self.update_statusline_data();
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
